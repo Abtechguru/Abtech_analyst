@@ -7,6 +7,10 @@ from urllib.parse import urljoin
 
 st.set_page_config(page_title="Abtech Car Analytics", layout="wide")
 
+# Initialize session state
+if 'df_clean' not in st.session_state:
+    st.session_state.df_clean = pd.DataFrame()
+
 # 🎨 Custom CSS
 st.markdown("""
     <style>
@@ -17,17 +21,27 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Function to fetch data with improved error handling
+@st.cache_data(ttl=3600, show_spinner="Fetching car data...")
 def fetch_car_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(max_retries=3)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        
+        response = session.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        
+        if not response.headers.get('content-type', '').startswith('text/html'):
+            st.error("Received non-HTML response")
+            return pd.DataFrame()
+            
     except requests.exceptions.RequestException as e:
-        st.error(f"Failed to fetch data: {e}")
+        st.error(f"Failed to fetch data: {str(e)}")
         return pd.DataFrame()
 
     soup = BeautifulSoup(response.content, 'html.parser')
@@ -81,7 +95,6 @@ def fetch_car_data(url):
 
     return pd.DataFrame(car_data)
 
-# Data cleaning function
 def clean_car_data(df):
     if df.empty:
         return df
@@ -94,7 +107,7 @@ def clean_car_data(df):
     df = df[df['price'] > 0]
     
     # Fill missing years with median
-    if 'year' in df.columns:
+    if 'year' in df.columns and not df['year'].empty:
         median_year = df['year'].median()
         df['year'] = df['year'].fillna(median_year).astype(int)
     
@@ -121,7 +134,7 @@ if st.button("Fetch and Analyze Data"):
         st.warning("No data fetched. The website structure may have changed or the site may be blocking requests.")
     else:
         df_clean = clean_car_data(df_raw)
-        st.session_state.df_clean = df_clean  # Store for CSV export
+        st.session_state.df_clean = df_clean
 
         st.subheader("🔎 Sample Data (10 rows)")
         st.dataframe(df_clean.head(10))
@@ -130,32 +143,44 @@ if st.button("Fetch and Analyze Data"):
         
         with col1:
             st.subheader("🚗 Top 10 Car Models")
-            popular_cars = df_clean['name'].value_counts().head(10)
-            st.bar_chart(popular_cars)
+            try:
+                popular_cars = df_clean['name'].value_counts().head(10)
+                st.bar_chart(popular_cars)
+            except Exception as e:
+                st.warning(f"Could not generate car models chart: {str(e)}")
             
             st.subheader("💰 Price Distribution")
-            fig = px.histogram(df_clean, x='price', nbins=20, 
-                              title="Distribution of Car Prices")
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.histogram(df_clean, x='price', nbins=20, 
+                                  title="Distribution of Car Prices")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not generate price distribution chart: {str(e)}")
 
         with col2:
             st.subheader("📅 Cars by Year")
-            if df_clean['year'].nunique() > 1:
-                fig = px.histogram(df_clean, x='year', 
-                                  title="Cars by Manufacturing Year")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Insufficient year data")
+            try:
+                if df_clean['year'].nunique() > 1:
+                    fig = px.histogram(df_clean, x='year', 
+                                      title="Cars by Manufacturing Year")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Insufficient year data")
+            except Exception as e:
+                st.warning(f"Could not generate year chart: {str(e)}")
             
             st.subheader("📍 Top Locations")
-            if df_clean['location'].nunique() > 1:
-                top_locations = df_clean['location'].value_counts().head(10)
-                st.bar_chart(top_locations)
-            else:
-                st.warning("Insufficient location data")
+            try:
+                if df_clean['location'].nunique() > 1:
+                    top_locations = df_clean['location'].value_counts().head(10)
+                    st.bar_chart(top_locations)
+                else:
+                    st.warning("Insufficient location data")
+            except Exception as e:
+                st.warning(f"Could not generate locations chart: {str(e)}")
 
 # Export CSV
-if "df_clean" in st.session_state:
+if not st.session_state.df_clean.empty:
     st.download_button(
         label="📥 Download Data as CSV",
         data=st.session_state.df_clean.to_csv(index=False).encode('utf-8'),
